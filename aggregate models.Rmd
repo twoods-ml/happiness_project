@@ -1,0 +1,332 @@
+---
+  title: "happiness_project"
+output: html_document
+---
+  
+  
+  
+```{r happiness, echo=FALSE}
+#LOADING DATA AND DOWNLOADING PACKAGES
+
+data = read.csv('https://raw.githubusercontent.com/arunagossai/happiness_project_R/master/happiness_data.csv', header = TRUE)
+head(data)
+summary(data)
+dim(data)
+#install.packages('fastDummies')
+#install.packages('qdapTools')
+#install.packages('glmnet')
+#install.packages('tseries')
+library(tseries)
+library(fastDummies)
+library(qdapTools)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+```
+
+
+
+```{r happiness, echo=FALSE}
+#VARIABLE CREATION AND PREPROCESSING
+
+#Creating a key for the regions, will use later
+regionkey = levels(data$region)
+regionvalues = c(1:10)
+key = data.frame(regionkey,regionvalues)
+
+#Changing the region from categorical to numeric
+data$region <- as.numeric(data$region)
+
+#Change getting rid of countries with no observations, and countries with no democracy value
+df1  = subset(data, country != "Kosovo"  & country !="Taiwan" & country!="Sudan" & democracy!= 'NA')
+paste( dim(data)[1] - dim(df1)[1], "observations lost")
+
+#Taking the mean of each column by country. Changes dataset from pooled cross-sectional to cross-sectional 
+df2 <- aggregate.data.frame(df1[-2], by = list(df1$country), mean)
+paste( dim(df1)[1] - dim(df2)[1], "observations lost")
+
+#adding a column for the region name
+rname = lookup(df2$region,key$regionvalues,key$regionkey)
+df = data.frame(df2,rname)
+
+#Creating dummy variables from the region name
+df_dum <- dummy_cols(df, select_columns = "rname")
+
+#testing for multicollinearity excluding regions and year from matrix
+cor(df[6:15])
+#serious issues with multicollinearity, dropping the problem variables
+df$men_edu <- NULL
+df$sanitation <- NULL
+df$elder_child <- NULL
+df$child_mortality <- NULL
+df_dum$men_edu <- NULL
+df_dum$sanitation <- NULL
+df_dum$elder_child <- NULL
+df_dum$child_mortality <- NULL
+
+#dropping variables that are not needed
+df$year <- NULL
+df$ï..id <- NULL
+df$id <- NULL
+df$region <- NULL
+df_dum$year <- NULL
+df_dum$ï..id <- NULL
+df_dum$id <- NULL
+df_dum$region <- NULL
+df_dum$rname <- NULL  #getting rid of one dummy variable to prevent multicollinearity
+df_dum$rname_West_EU<-NULL
+
+#creating binary 'very happy' variables for classification models
+df_dum$veryhappy <- ifelse(df_dum$happiness >= 6.5,1,0)
+df$veryhappy <- ifelse(df$happiness >= 6.5,1,0)
+```
+
+
+
+
+
+```{r happiness, echo=FALSE}
+#CHECKING VARIABLE CORRELATION AND TRANSFORMATIONS
+df1 = df_dum
+dim(df1)
+
+#relationships with independent
+hist(df1$happiness)
+jarque.bera.test(df1$happiness) #happiness is not normally distributed
+plot(df1$women_edu,df1$happiness)
+plot(log(df1$women_edu),df1$happiness)#women_edu seems to fit better with log(women_edu)
+
+plot(df1$democracy,df1$happiness) #democracy variable seems to have a linear relationship
+plot(df1$gini,df1$happiness) 
+plot(log(df1$gini),df1$happiness) #gini seems uncorrelated to happiness
+plot(df1$gini^2,df1$happiness) #the log or squared of gini does not help the fit
+
+plot(df1$refugee,df1$happiness) 
+plot(df1$refugee,df1$happiness, xlim = c(0,1))
+plot(log(df1$refugee + 1),df1$happiness)
+plot(log(df1$refugee + 1),df1$happiness, xlim = c(0,1)) # refugee share does not seem to be correlated, log helps with variance
+
+plot(df1$pop_den,df1$happiness)
+plot(log(df1$pop_den),df1$happiness) # pop not seems uncorrelated. log noticably reduces variance
+
+plot(df1$labour,df1$happiness)
+plot(log(df1$labour),df1$happiness)
+plot(df1$labour,log(df1$happiness)) #labour seems uncorrelated to happiness
+
+#TRANSFORMING VARIABLES
+df1$refugee <- log(df1$refugee+1)
+df1$women_edu <- log(df1$women_edu)
+df1$pop_den <- log(df1$pop_den)
+df1$refugee[df1$refugee > 1] <- mean(df1$refugee)
+pairs(df1[2:8])
+```
+
+
+
+
+
+```{r}
+
+#MODEL 1: LAUREN — LINEAR MODEL WITH ALL VARIABLES
+set.seed(123)
+n = nrow(df1)
+Index = sample(1:n, size = round(0.7*n), replace=FALSE)
+train1 = df1[Index,]
+test1 = df1[-Index,]  
+
+M1 = lm(happiness ~ ., train1[2:17])
+pred_1 = predict(M1, test1[2:17])
+head(test1[2:17])
+RMSE_OUT_1 = sqrt(sum((pred_1-test1$happiness)^2)/length(pred_1))
+RMSE_OUT_1
+summary(M1)
+par(mfrow=c(2,2))
+plot(M1)
+```
+
+
+```{r}
+#MODEL 2: ARUNA — RIDGE REGRESSION WITH A 5 FOLD CROSS VALIDATION
+#TESTING RIDGE, LASSO AND HYBRID PENALTIES
+results <- c()
+alpha = c(0,.25,.5,.75,1)
+
+for(i in 1:5){
+  M2 = cv.glmnet(as.matrix(train1[2:17]),train1$happiness, alpha = alpha[i], nfolds = 5)
+  
+  pred_in_2 = predict(M2, as.matrix(train1[2:17]), s = 'lambda.min')
+  pred_out_2 = predict(M2, as.matrix(test1[2:17]), s = 'lambda.min')
+  
+  RMSE_IN_2 = sqrt(sum((pred_in_2-train1[,2])^2)/length(pred_in_2))
+  RMSE_OUT_2 = sqrt(sum((pred_out_2-test1[,2])^2)/length(pred_out_2))
+  
+  results <- rbind(results,c(alpha[i],RMSE_IN_2,RMSE_OUT_2,M2$lambda.min))
+  colnames(results)<-c("Alpha","RMSE_IN","RMSE_OUT","Lambda")
+}
+results
+results[which(results[,3] == min(results[,3])),]
+
+#MODEL 2
+M2 = cv.glmnet(as.matrix(train1[2:17]),train1$happiness, alpha = 0, nfolds = 5)
+pred_out_2 = predict(M2, as.matrix(test1[2:17]), s = 'lambda.min')
+plot(M2)
+coef(M2, s = 'lambda.min')
+
+#RESIDUAL ANALYSIS
+#PLOTTING FITTED VALUES
+plot(pred_out_2,test1$happiness, col = c(1,6))
+plot(pred_out_2-test1$happiness)
+abline(0,0,col='black')
+hist(pred_out_2-test1$happiness)
+summary(pred_out_2-test1$happiness)
+jarque.bera.test(pred_out_2-test1$happiness) #null of the JB test is normally distributed
+```
+
+
+
+```{r}
+#MODEL 3: YIFAN — LINEAR REGRESSION
+train3 = df_dum[Index,]
+test3 = df_dum[-Index,]  
+
+M3.6 = lm(happiness ~ democracy + refugee + women_edu + pop_den + labour, train3[2:17])
+pred_base = predict(M3.6, test3[2:17])
+RMSE_BASE = sqrt(sum((pred_base-test3$happiness)^2)/length(pred_base))
+RMSE_BASE
+pred_base_in = predict(M3.6, train3[2:17])
+RMSE_BASE_in = sqrt(sum((pred_base_in-train3$happiness)^2)/length(pred_base_in))
+RMSE_BASE_in
+summary(M3.6)
+
+#QQ plot for residual diagnostic
+par(mfrow=c(2,2))
+plot(M3.6)
+summary(M3.6)
+cbind(M3.6$coefficients,confint(M3.6))
+```
+
+
+
+```{r}
+#MODEL 4: ERNESTO - LOGISTIC REGRESSION CLASSIFICATION
+#rename countries column
+df4 <- df
+colnames(df4)
+names(df4)[names(df4)=="Group.1"]<-"countries"
+names(df4)[names(df4)=="rname"]<-"region"
+
+#df41$admit <- factor(df41$admit) #transforms veryhappy into a factor (categorical) variable
+df4$veryhappy <- factor(df4$veryhappy)
+class(df4$veryhappy)
+
+#SPLITTING INTO TRAINING AND TESTING SETS
+set.seed(123) #locks seed for random partitioning
+library(caret)  #calls the caret library to use createDataPartition()
+
+#creates a vector of rows to randomly sample p=70% from the raw data for traning
+inTrain <- createDataPartition(y=df4$veryhappy, p=.70, list = FALSE) 
+
+#stores included rows in the training set, excluded in the test/validation set
+Training<-df4[inTrain,]  
+Testing<-df4[-inTrain,]
+
+#MODEL
+M_LOG<-glm(veryhappy ~ democracy + gini + refugee + women_edu + pop_den + labour, data = Training, family = "binomial")
+summary(M_LOG)
+exp(cbind(M_LOG$coefficients, confint(M_LOG)))
+#TRAINING MATRIX
+confusionMatrix(table(predict(M_LOG, Training, type="response") >= 0.5,
+                      Training$veryhappy == 1))
+#TESTING MATRIX
+confusionMatrix(table(predict(M_LOG, Testing, type="response") >= 0.5,
+                      Testing$veryhappy == 1))
+
+#GETTING CONFIDENCE INTERVALS
+cbind(M_LOG$coefficients,confint(M_LOG))
+```
+
+
+
+
+```{r}
+#MODEL 5: CONRAD — SUPPORT VECTOR MACHINES CLASSIFICATION
+df5 = df_dum
+df5$refugee <- log(df5$refugee+1)
+df5$pop_den <- log(df5$pop_den)
+df5$refugee[df5$refugee > 1] <- mean(df5$refugee)
+ 
+set.seed(123)
+n = nrow(df5)
+Index = sample(1:n, size = round(0.7*n), replace=FALSE)
+train5 = df5[Index,]
+test5 = df5[-Index,] 
+
+#TESTING SVM WITH DIFFERENT GAMMA
+SVM_results = c()
+gamma = c(.5,.1,.05,.01,.005)
+for (i in 1:5){
+  SVM<-svm(veryhappy~ ., data = train5[3:18], kernel = "radial", gamma = gamma[i], type="C-classification", cross = 10)
+ 
+  SVM_IN =  predict(SVM, train5)
+  SVM_OUT =  predict(SVM, test5)
+ 
+  confusion_IN_5 = table(SVM_IN,train5$veryhappy)
+  confusion_OUT_5 = table(SVM_OUT,test5$veryhappy)
+ 
+  Accuracy_IN_5 = (confusion_IN_5[1,1]+confusion_IN_5[2,2])/length(SVM_IN)
+  Accuracy_OUT_5 = (confusion_OUT_5[1,1]+confusion_OUT_5[2,2])/length(SVM_OUT)
+ 
+  SVM_results <- rbind(SVM_results,c(gamma[i],Accuracy_IN_5,Accuracy_OUT_5))
+  colnames(SVM_results)<-c("Gamma","Accuracy In","Accuracy Out")
+}
+SVM_results
+MAX_ACC = SVM_results[which(SVM_results[,3] == max(SVM_results[,3])),]
+MAX_ACC
+ 
+#MODEL: SVM WITH GAMMA OF .0001
+SVM<-svm(veryhappy~ ., data = train5[3:18], kernel = "radial", gamma = MAX_ACC[1], type="C-classification")
+SVM_OUT =  predict(SVM, test5)
+table(SVM_OUT,test5$veryhappy)
+confusionMatrix(table(SVM_OUT,test5$veryhappy))
+```
+```{r}
+#MODEL 6: TONY — LOGISTIC REGRESSION CLASSIFICATION WITH REGION VARIABLES
+#Setting up the dataframe
+df6 <- df_dum
+names(df6)[names(df6)=="Group.1"]<-"countries"
+names(df6)[names(df6)=="rname"]<-"region"
+
+#df1$admit <- factor(df1$admit) #transforms veryhappy into a factor (categorical) variable
+df6$veryhappy <- factor(df6$veryhappy)
+class(df6$veryhappy)
+
+###Validation
+library(caret)  #calls the caret library to use createDataPartition()
+set.seed(123) #locks seed for random partitioning
+
+#SPLITTING DATA INTO TRAINING AND TESTING SETS
+#creates a vector of rows to randomly sample p=70% from the raw data for traning
+inTrain6 <- createDataPartition(y=df6$veryhappy, p=.70, list = FALSE)
+
+#stores included rows in the training set, excluded in the test/validation set
+Training6<-df6[inTrain6,]  
+Testing6<-df6[-inTrain6,]  
+
+#MODEL
+RLOG<-glm(veryhappy ~ ., data = Training6[3:18], family = binomial())
+summary(RLOG)
+
+#TRAINING DATA
+confusionMatrix(table(predict(RLOG, Training6, type="response") >= 0.5,
+                      Training6$veryhappy == 1))
+#TESTING DATA
+confusionMatrix(table(predict(RLOG, Testing6, type="response") >= 0.5,
+                      Testing6$veryhappy == 1))
+
+#GETTING CONFIDENCE INTERVALS
+cbind(RLOG$coefficients,confint(RLOG))
+```
+
+
+
